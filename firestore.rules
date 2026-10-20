@@ -1,0 +1,124 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isBootstrappedAdmin() {
+      return isSignedIn() && request.auth.token.email == 'millerhardcore927@gmail.com';
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin() || (isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Connection testing endpoint for health checks
+    match /test/{testId} {
+      allow read: if true;
+    }
+
+    // Admin authorization store
+    match /admins/{adminId} {
+      allow read: if isSignedIn();
+      allow write: if isBootstrappedAdmin();
+    }
+
+    // User accounts
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidId(userId) && request.auth.uid == userId
+        && incoming().uid == request.auth.uid
+        && incoming().displayName is string && incoming().displayName.size() > 0 && incoming().displayName.size() <= 100
+        && incoming().email is string && incoming().email.size() > 0 && incoming().email.size() <= 120
+        && incoming().role == 'member'
+        && incoming().status == 'active';
+      allow update: if (
+        (isOwner(userId) && incoming().uid == existing().uid && incoming().email == existing().email
+         && incoming().role == existing().role && incoming().status == existing().status
+         && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'bio', 'updatedAt']))
+        || isAdmin()
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Resources (Learning materials)
+    match /resources/{resourceId} {
+      allow read: if resource.data.status == 'active' || (isSignedIn() && (resource.data.authorId == request.auth.uid || isAdmin()));
+      
+      allow create: if isSignedIn() && isValidId(resourceId)
+        && incoming().authorId == request.auth.uid
+        && incoming().title is string && incoming().title.size() >= 3 && incoming().title.size() <= 200
+        && incoming().description is string && incoming().description.size() >= 10 && incoming().description.size() <= 4000
+        && incoming().category is string && incoming().category.size() > 0 && incoming().category.size() <= 100
+        && incoming().resourceUrl is string && incoming().resourceUrl.size() > 0 && incoming().resourceUrl.size() <= 1000
+        && incoming().status in ['active', 'hidden'];
+
+      allow update: if isSignedIn() && (
+        (existing().authorId == request.auth.uid && incoming().authorId == existing().authorId
+         && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'category', 'educationLevel', 'mediaType', 'resourceUrl', 'tags', 'status', 'updatedAt']))
+        || (incoming().diff(existing()).affectedKeys().hasOnly(['viewsCount', 'favoritesCount']))
+        || isAdmin()
+      );
+
+      allow delete: if isSignedIn() && (existing().authorId == request.auth.uid || isAdmin());
+    }
+
+    // Bookmarked / Favorite resources
+    match /favorites/{favoriteId} {
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(favoriteId)
+        && incoming().userId == request.auth.uid
+        && incoming().resourceId is string && incoming().resourceId.size() > 0 && incoming().resourceId.size() <= 128;
+      allow delete: if isSignedIn() && existing().userId == request.auth.uid;
+    }
+
+    // Reports against inappropriate content
+    match /reports/{reportId} {
+      allow read: if isSignedIn() && (isAdmin() || resource.data.reporterId == request.auth.uid);
+      allow create: if isSignedIn() && isValidId(reportId)
+        && incoming().reporterId == request.auth.uid
+        && incoming().resourceId is string && incoming().resourceId.size() > 0
+        && incoming().reason in ['broken_link', 'copyright', 'inappropriate', 'spam', 'other']
+        && incoming().status == 'pending';
+      allow update: if isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'resolvedBy', 'resolvedAt']);
+      allow delete: if isAdmin();
+    }
+
+    // Moderation Audit Logs
+    match /moderationLogs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && isValidId(logId) && incoming().adminId == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    // Site configuration and category directory
+    match /settings/{settingId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+  }
+}
